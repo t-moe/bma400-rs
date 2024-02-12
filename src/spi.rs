@@ -1,79 +1,66 @@
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::spi::Operation;
 
 use crate::{
-    hal::blocking::spi::{
-        Transfer,
-        Write,
-    },
-    interface::{
-        ReadFromRegister,
-        WriteToRegister,
-    },
-    registers::{
-        ChipId,
-        ConfigReg,
-        InterfaceConfig,
-        ReadReg,
-    },
-    BMA400Error,
-    Config,
-    BMA400,
+    hal::spi::SpiDevice,
+    interface::{ReadFromRegister, WriteToRegister},
+    registers::{ChipId, ConfigReg, InterfaceConfig, ReadReg},
+    BMA400Error, Config, BMA400,
 };
 
 /// SPI Interface wrapper
 // Wrapper class to instantiate BMA400 with an SPI interface
-// (extending the Write and WriteRead traits to WriteToRegister and ReadFromRegister)
+// (extending the SpiDevice trait to WriteToRegister and ReadFromRegister)
 #[derive(Debug)]
-pub struct SPIInterface<SPI, CSBPin> {
+pub struct SPIInterface<SPI> {
     spi: SPI,
-    csb: CSBPin,
 }
 
-impl<SPI, CSBPin> SPIInterface<SPI, CSBPin> {
-    /// Consumes the Interface returning underlying SPI peripheral and the pin
-    pub fn destroy(self) -> (SPI, CSBPin) {
-        (self.spi, self.csb)
+impl<SPI> SPIInterface<SPI> {
+    /// Consumes the Interface returning underlying SPI peripheral
+    pub fn destroy(self) -> SPI {
+        self.spi
     }
 }
 
-impl<SPI, CSBPin, InterfaceError, PinError> WriteToRegister for SPIInterface<SPI, CSBPin>
+impl<SPI, InterfaceError> WriteToRegister for SPIInterface<SPI>
 where
-    SPI: Write<u8, Error = InterfaceError>,
-    CSBPin: OutputPin<Error = PinError>,
+    SPI: SpiDevice<u8, Error = InterfaceError>,
 {
-    type Error = BMA400Error<InterfaceError, PinError>;
+    type Error = BMA400Error<InterfaceError>;
 
     fn write_register<T: ConfigReg>(&mut self, register: T) -> Result<(), Self::Error> {
-        self.csb.set_low().map_err(BMA400Error::ChipSelectPinError)?;
-        self.spi.write(&[register.addr(), register.to_byte()]).map_err(BMA400Error::IOError)?;
-        self.csb.set_high().map_err(BMA400Error::ChipSelectPinError)?;
-        Ok(())
+        self.spi
+            .write(&[register.addr(), register.to_byte()])
+            .map_err(BMA400Error::IOError)
     }
 }
 
-impl<SPI, CSBPin, InterfaceError, PinError> ReadFromRegister for SPIInterface<SPI, CSBPin>
+impl<SPI, InterfaceError> ReadFromRegister for SPIInterface<SPI>
 where
-    SPI: Transfer<u8, Error = InterfaceError>,
-    CSBPin: OutputPin<Error = PinError>,
+    SPI: SpiDevice<u8, Error = InterfaceError>,
 {
-    type Error = BMA400Error<InterfaceError, PinError>;
+    type Error = BMA400Error<InterfaceError>;
 
-    fn read_register<T: ReadReg>(&mut self, register: T, buffer: &mut [u8]) -> Result<(), Self::Error> {
-        self.csb.set_low().map_err(BMA400Error::ChipSelectPinError)?;
-        self.spi.transfer(&mut [register.addr() | 1 << 7, 0]).map_err(BMA400Error::IOError)?;
-        self.spi.transfer(buffer).map_err(BMA400Error::IOError)?;
-        self.csb.set_high().map_err(BMA400Error::ChipSelectPinError)?;
-        Ok(())
+    fn read_register<T: ReadReg>(
+        &mut self,
+        register: T,
+        buffer: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        self.spi
+            .transaction(&mut [
+                Operation::Write(&[register.addr() | 1 << 7, 0]),
+                Operation::Read(buffer),
+            ])
+            .map_err(|e| BMA400Error::IOError(e))
     }
 }
 
-impl<SPI, CSBPin, InterfaceError, PinError> BMA400<SPIInterface<SPI, CSBPin>>
+impl<SPI, InterfaceError> BMA400<SPIInterface<SPI>>
 where
-    SPI: Transfer<u8, Error = InterfaceError> + Write<u8, Error = InterfaceError>,
-    CSBPin: OutputPin<Error = PinError>,
+    SPI: SpiDevice<u8, Error = InterfaceError>,
 {
     /// Create a new instance of the BMA400 using 4-wire SPI
-    /// 
+    ///
     /// # Examples
     /// ```
     /// # use embedded_hal_mock::{
@@ -95,13 +82,12 @@ where
     /// # ];
     /// # let spi = Mock::new(&expected_io);
     /// # let csb_pin = MockPin::new(&expected_pin);
-    /// // spi implements embedded-hal spi::Transfer and spi::Write
-    /// // csb_pin implements embedded-hal digital::v2::OutputPin
-    /// let mut accelerometer = BMA400::new_spi(spi, csb_pin);
+    /// // spi implements embedded-hal spi::SpiDevice
+    /// let mut accelerometer = BMA400::new_spi(spi);
     /// assert!(accelerometer.is_ok());
     /// ```
-    pub fn new_spi(spi: SPI, csb: CSBPin) -> Result<BMA400<SPIInterface<SPI, CSBPin>>, BMA400Error<InterfaceError, PinError>> {
-        let mut interface = SPIInterface { spi, csb };
+    pub fn new_spi(spi: SPI) -> Result<BMA400<SPIInterface<SPI>>, BMA400Error<InterfaceError>> {
+        let mut interface = SPIInterface { spi };
         let config = Config::default();
         // Initialize SPI Mode by doing a dummy read
         interface.read_register(ChipId, &mut [0u8; 1])?;
@@ -115,7 +101,7 @@ where
         }
     }
     /// Create a new instance of the BMA400 using 3-wire SPI
-    /// 
+    ///
     /// # Examples
     /// ```
     /// # use embedded_hal_mock::{
@@ -140,13 +126,15 @@ where
     /// # ];
     /// # let spi = Mock::new(&expected_io);
     /// # let csb_pin = MockPin::new(&expected_pin);
-    /// // spi implements embedded-hal spi::Transfer and spi::Write
-    /// // csb_pin implements embedded-hal digital::v2::OutputPin
+    /// // spi implements embedded-hal spi::SpiDevice
+    /// // csb_pin implements embedded-hal digital::OutputPin
     /// let mut accelerometer = BMA400::new_spi_3wire(spi, csb_pin);
     /// assert!(accelerometer.is_ok());
     /// ```
-    pub fn new_spi_3wire(spi: SPI, csb: CSBPin) -> Result<BMA400<SPIInterface<SPI, CSBPin>>, BMA400Error<InterfaceError, PinError>> {
-        let mut interface = SPIInterface { spi, csb };
+    pub fn new_spi_3wire(
+        spi: SPI,
+    ) -> Result<BMA400<SPIInterface<SPI>>, BMA400Error<InterfaceError>> {
+        let mut interface = SPIInterface { spi };
         let config = Config::default();
         // Initialize SPI Mode by doing a dummy read
         interface.read_register(ChipId, &mut [0u8; 1])?;
